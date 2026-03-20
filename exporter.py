@@ -81,3 +81,160 @@ def get_dependency_order(conn, tables):
             result.append(t)
 
     return result
+
+
+def extract_ddl_pgdump(conn_params, tables, backup_dir, logger):
+    """Extract DDL using pg_dump --schema-only for each table."""
+    env = os.environ.copy()
+    env["PGHOST"] = conn_params["host"]
+    env["PGPORT"] = str(conn_params["port"])
+    env["PGDATABASE"] = conn_params["dbname"]
+    env["PGUSER"] = conn_params["user"]
+    env["PGPASSWORD"] = conn_params["password"]
+    env["PGSSLMODE"] = conn_params.get("sslmode", "require")
+
+    all_ddl = []
+    for table in tables:
+        try:
+            result = subprocess.run(
+                ["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "-t", f"public.{table}"],
+                capture_output=True, text=True, env=env, timeout=30,
+            )
+            if result.returncode == 0:
+                all_ddl.append(f"-- Table: {table}\n{result.stdout}")
+            else:
+                logger.warning(f"pg_dump falhou para {table}: {result.stderr.strip()}")
+                return None  # fallback to pg_catalog
+        except FileNotFoundError:
+            logger.warning("pg_dump não encontrado, usando fallback via pg_catalog")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.warning(f"pg_dump timeout para {table}")
+            return None
+
+    ddl = "\n".join(all_ddl)
+    schema_path = os.path.join(backup_dir, "schema.sql")
+    with open(schema_path, "w", encoding="utf-8") as f:
+        f.write(ddl)
+    logger.info(f"DDL extraído via pg_dump ({len(tables)} tabelas)")
+    return ddl
+
+
+def extract_ddl_fallback(conn, tables, backup_dir, logger):
+    """Extract DDL using pg_catalog queries (fallback when pg_dump unavailable)."""
+    logger.warning("Usando fallback pg_catalog para DDL — partial indexes e expression defaults podem ser omitidos")
+    all_ddl = []
+
+    with conn.cursor() as cur:
+        for table in tables:
+            # Get columns
+            cur.execute("""
+                SELECT column_name, data_type, character_maximum_length,
+                       is_nullable, column_default, udt_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+            """, (table,))
+            columns = cur.fetchall()
+
+            col_defs = []
+            for col_name, data_type, max_len, nullable, default, udt_name in columns:
+                # Map data types
+                if data_type == 'USER-DEFINED':
+                    col_type = udt_name
+                elif data_type == 'character varying':
+                    col_type = f"varchar({max_len})" if max_len else "varchar"
+                elif data_type == 'character':
+                    col_type = f"char({max_len})" if max_len else "char"
+                elif data_type == 'ARRAY':
+                    col_type = f"{udt_name}"
+                else:
+                    col_type = data_type
+
+                parts = [f'    "{col_name}" {col_type}']
+                if nullable == 'NO':
+                    parts.append("NOT NULL")
+                if default:
+                    parts.append(f"DEFAULT {default}")
+                col_defs.append(" ".join(parts))
+
+            ddl = f'CREATE TABLE IF NOT EXISTS "public"."{table}" (\n'
+            ddl += ",\n".join(col_defs)
+
+            # Get primary key
+            cur.execute("""
+                SELECT kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                    AND tc.table_schema = 'public'
+                    AND tc.table_name = %s
+                ORDER BY kcu.ordinal_position
+            """, (table,))
+            pk_cols = [row[0] for row in cur.fetchall()]
+            if pk_cols:
+                ddl += f',\n    PRIMARY KEY ({", ".join(f"{c}" for c in pk_cols)})'
+
+            ddl += "\n);\n"
+
+            # Get indexes (non-primary)
+            cur.execute("""
+                SELECT indexdef FROM pg_indexes
+                WHERE schemaname = 'public' AND tablename = %s
+                AND indexname NOT IN (
+                    SELECT constraint_name FROM information_schema.table_constraints
+                    WHERE table_schema = 'public' AND table_name = %s AND constraint_type = 'PRIMARY KEY'
+                )
+            """, (table, table))
+            for (indexdef,) in cur.fetchall():
+                ddl += f"{indexdef};\n"
+
+            all_ddl.append(f"-- Table: {table}\n{ddl}")
+
+    # Get foreign keys separately (to add after all tables created)
+    fk_ddl = []
+    with conn.cursor() as cur:
+        for table in tables:
+            cur.execute("""
+                SELECT
+                    tc.constraint_name,
+                    tc.table_name,
+                    kcu.column_name,
+                    ccu.table_name AS referenced_table,
+                    ccu.column_name AS referenced_column
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage ccu
+                    ON tc.constraint_name = ccu.constraint_name
+                    AND tc.table_schema = ccu.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                    AND tc.table_schema = 'public'
+                    AND tc.table_name = %s
+            """, (table,))
+            for constraint_name, tbl, col, ref_tbl, ref_col in cur.fetchall():
+                fk_ddl.append(
+                    f'ALTER TABLE "public"."{tbl}" ADD CONSTRAINT "{constraint_name}" '
+                    f'FOREIGN KEY ("{col}") REFERENCES "public"."{ref_tbl}" ("{ref_col}");'
+                )
+
+    if fk_ddl:
+        all_ddl.append("-- Foreign Keys\n" + "\n".join(fk_ddl))
+
+    ddl = "\n\n".join(all_ddl)
+    schema_path = os.path.join(backup_dir, "schema.sql")
+    with open(schema_path, "w", encoding="utf-8") as f:
+        f.write(ddl)
+    logger.info(f"DDL extraído via pg_catalog fallback ({len(tables)} tabelas)")
+    return ddl
+
+
+def extract_ddl(conn, conn_params, tables, backup_dir, logger):
+    """Extract DDL — try pg_dump first, fallback to pg_catalog."""
+    ddl = extract_ddl_pgdump(conn_params, tables, backup_dir, logger)
+    if ddl is None:
+        ddl = extract_ddl_fallback(conn, tables, backup_dir, logger)
+    return ddl

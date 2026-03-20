@@ -1,0 +1,9 @@
+[project]
+name = "postgresrestore"
+version = "0.1.0"
+description = "Copia todas as tabelas de um PostgreSQL remoto para um local"
+requires-python = ">=3.13"
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "python-dotenv>=1.0",
+]

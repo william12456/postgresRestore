@@ -238,3 +238,72 @@ def extract_ddl(conn, conn_params, tables, backup_dir, logger):
     if ddl is None:
         ddl = extract_ddl_fallback(conn, tables, backup_dir, logger)
     return ddl
+
+
+def export_table_data(conn_params, table, backup_dir, logger):
+    """Export a single table's data to CSV using COPY TO STDOUT."""
+    start = time.time()
+    csv_path = os.path.join(backup_dir, f"{table}.csv")
+    row_count = 0
+
+    try:
+        with psycopg.connect(**conn_params) as conn:
+            with conn.cursor() as cur:
+                # Get row count
+                cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(
+                    sql.Identifier("public", table)
+                ))
+                row_count = cur.fetchone()[0]
+
+                # Export via COPY
+                with cur.copy(sql.SQL("COPY {} TO STDOUT WITH (FORMAT CSV, HEADER, ENCODING 'UTF8')").format(
+                    sql.Identifier("public", table)
+                )) as copy:
+                    with open(csv_path, "wb") as f:
+                        for data in copy:
+                            f.write(data)
+
+        elapsed = time.time() - start
+        logger.info(f"Exportando: {table} ({row_count} linhas) ... OK [{elapsed:.1f}s]")
+        return table, row_count, None
+    except Exception as e:
+        elapsed = time.time() - start
+        logger.error(f"Exportando: {table} ... ERRO [{elapsed:.1f}s]: {e}")
+        return table, 0, str(e)
+
+
+def export_all_data(conn_params, tables, backup_dir, logger, workers=4):
+    """Export all tables in parallel using ThreadPoolExecutor."""
+    results = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(export_table_data, conn_params, table, backup_dir, logger): table
+            for table in tables
+        }
+        for future in as_completed(futures):
+            results.append(future.result())
+    return results
+
+
+def export_sequences(conn, backup_dir, logger):
+    """Export sequence states to sequences.sql."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT sequencename, last_value, is_called
+            FROM pg_sequences
+            WHERE schemaname = 'public'
+        """)
+        sequences = cur.fetchall()
+
+    if not sequences:
+        logger.info("Nenhuma sequence encontrada")
+        return
+
+    seq_path = os.path.join(backup_dir, "sequences.sql")
+    with open(seq_path, "w", encoding="utf-8") as f:
+        for seq_name, last_value, is_called in sequences:
+            if last_value is not None:
+                is_called_str = "true" if is_called else "false"
+                f.write(f"SELECT setval('\"public\".\"{seq_name}\"', {last_value}, {is_called_str});\n")
+
+    logger.info(f"{len(sequences)} sequences exportadas")

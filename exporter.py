@@ -175,7 +175,7 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
             """, (table,))
             pk_cols = [row[0] for row in cur.fetchall()]
             if pk_cols:
-                ddl += f',\n    PRIMARY KEY ({", ".join(f"{c}" for c in pk_cols)})'
+                ddl += f',\n    PRIMARY KEY ({", ".join(f\'"{c}"\' for c in pk_cols)})'
 
             ddl += "\n);\n"
 

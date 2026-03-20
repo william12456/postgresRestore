@@ -1,6 +1,23 @@
 import os
 import sys
+from urllib.parse import urlparse
+
 from dotenv import load_dotenv
+
+
+def _parse_url(url):
+    """Parse a DATABASE_URL into individual connection fields."""
+    parsed = urlparse(url)
+    params = dict(p.split("=", 1) for p in parsed.query.split("&") if "=" in p) if parsed.query else {}
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 5432,
+        "dbname": parsed.path.lstrip("/") if parsed.path else "",
+        "user": parsed.username or "",
+        "password": parsed.password or "",
+        "sslmode": params.get("sslmode", "require"),
+        "conninfo": url,
+    }
 
 
 def load_config():
@@ -10,7 +27,7 @@ def load_config():
     # Support DATABASE_URL style or individual vars
     remote_url = os.getenv("REMOTE_DATABASE_URL")
     if remote_url:
-        remote = {"conninfo": remote_url}
+        remote = _parse_url(remote_url)
     else:
         remote = {
             "host": os.getenv("REMOTE_DB_HOST"),
@@ -23,7 +40,7 @@ def load_config():
 
     local_url = os.getenv("LOCAL_DATABASE_URL")
     if local_url:
-        local = {"conninfo": local_url}
+        local = _parse_url(local_url)
     else:
         local = {
             "host": os.getenv("LOCAL_DB_HOST", "localhost"),

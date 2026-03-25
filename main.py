@@ -51,7 +51,10 @@ def main():
     logger = setup_logger(backup_dir)
     overall_start = time.time()
 
+    remote_schema = config["remote_schema"]
+    local_schema = config["local_schema"]
     logger.info("=== POSTGRES RESTORE — INICIANDO ===")
+    logger.info(f"Schema remoto: {remote_schema}, Schema local: {local_schema}")
 
     # --- EXPORT PHASE ---
     logger.info("Conectando ao banco remoto...")
@@ -63,27 +66,27 @@ def main():
 
     try:
         # Discover tables
-        tables = discover_tables(remote_conn, logger)
+        tables = discover_tables(remote_conn, logger, schema=remote_schema)
         if not tables:
-            logger.warning("Nenhuma tabela encontrada no schema public")
+            logger.warning(f"Nenhuma tabela encontrada no schema {remote_schema}")
             return 0
 
         # Dependency order
-        ordered_tables = get_dependency_order(remote_conn, tables)
+        ordered_tables = get_dependency_order(remote_conn, tables, schema=remote_schema)
         logger.info(f"Ordem de dependência calculada para {len(ordered_tables)} tabelas")
 
         # Extract DDL
         logger.info("Extraindo DDL...")
-        ddl = extract_ddl(remote_conn, config["remote"], ordered_tables, backup_dir, logger)
+        ddl = extract_ddl(remote_conn, config["remote"], ordered_tables, backup_dir, logger, schema=remote_schema)
 
         # Export sequences
-        export_sequences(remote_conn, backup_dir, logger)
+        export_sequences(remote_conn, backup_dir, logger, schema=remote_schema)
     finally:
         remote_conn.close()
 
     # Export data (parallel)
     logger.info(f"Exportando dados ({args.workers} workers)...")
-    export_results = export_all_data(config["remote"], ordered_tables, backup_dir, logger, workers=args.workers)
+    export_results = export_all_data(config["remote"], ordered_tables, backup_dir, logger, workers=args.workers, schema=remote_schema)
 
     # Check export errors
     errors = [(t, e) for t, _, e in export_results if e]
@@ -107,7 +110,7 @@ def main():
 
     logger.info("Importando para banco local...")
     try:
-        total_imported = run_import(config["local"], exportable_tables, backup_dir, logger)
+        total_imported = run_import(config["local"], exportable_tables, backup_dir, logger, schema=local_schema, source_schema=remote_schema)
     except Exception as e:
         logger.error(f"Import falhou: {e}")
         return 1

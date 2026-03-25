@@ -15,7 +15,6 @@ def _parse_url(url):
         "dbname": parsed.path.lstrip("/") if parsed.path else "",
         "user": parsed.username or "",
         "password": parsed.password or "",
-        "sslmode": params.get("sslmode", "require"),
         "conninfo": url,
     }
 
@@ -35,8 +34,10 @@ def load_config():
             "dbname": os.getenv("REMOTE_DB_NAME"),
             "user": os.getenv("REMOTE_DB_USER"),
             "password": os.getenv("REMOTE_DB_PASSWORD"),
-            "sslmode": os.getenv("REMOTE_DB_SSLMODE", "require"),
         }
+        remote_sslmode = os.getenv("REMOTE_DB_SSLMODE")
+        if remote_sslmode:
+            remote["sslmode"] = remote_sslmode
 
     local_url = os.getenv("LOCAL_DATABASE_URL")
     if local_url:
@@ -49,6 +50,9 @@ def load_config():
             "user": os.getenv("LOCAL_DB_USER"),
             "password": os.getenv("LOCAL_DB_PASSWORD"),
         }
+        local_sslmode = os.getenv("LOCAL_DB_SSLMODE")
+        if local_sslmode:
+            local["sslmode"] = local_sslmode
 
     # Validate required remote fields
     if "conninfo" not in remote:
@@ -64,4 +68,7 @@ def load_config():
             print(f"ERRO: Variáveis de ambiente faltando para banco local: {', '.join('LOCAL_DB_' + k.upper() for k in missing)}")
             sys.exit(1)
 
-    return {"remote": remote, "local": local}
+    remote_schema = os.getenv("REMOTE_DB_SCHEMA", "public")
+    local_schema = os.getenv("LOCAL_DB_SCHEMA", "public")
+
+    return {"remote": remote, "local": local, "remote_schema": remote_schema, "local_schema": local_schema}

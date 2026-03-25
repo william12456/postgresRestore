@@ -22,16 +22,16 @@ def connect_with_retry(conn_params, logger, max_retries=3):
                 raise
 
 
-def discover_tables(conn, logger):
-    """List all tables in the public schema."""
+def discover_tables(conn, logger, schema="public"):
+    """List all tables in the given schema."""
     with conn.cursor() as cur:
-        cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename")
+        cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = %s ORDER BY tablename", (schema,))
         tables = [row[0] for row in cur.fetchall()]
-    logger.info(f"{len(tables)} tabelas encontradas no schema public")
+    logger.info(f"{len(tables)} tabelas encontradas no schema {schema}")
     return tables
 
 
-def get_dependency_order(conn, tables):
+def get_dependency_order(conn, tables, schema="public"):
     """Return tables in topological order based on foreign key dependencies.
 
     Returns a list where referenced tables come before dependent tables.
@@ -46,9 +46,9 @@ def get_dependency_order(conn, tables):
                 ON tc.constraint_name = ccu.constraint_name
                 AND tc.table_schema = ccu.table_schema
             WHERE tc.constraint_type = 'FOREIGN KEY'
-                AND tc.table_schema = 'public'
+                AND tc.table_schema = %s
                 AND tc.table_name != ccu.table_name
-        """)
+        """, (schema,))
         edges = cur.fetchall()
 
     # Build adjacency list
@@ -83,7 +83,7 @@ def get_dependency_order(conn, tables):
     return result
 
 
-def extract_ddl_pgdump(conn_params, tables, backup_dir, logger):
+def extract_ddl_pgdump(conn_params, tables, backup_dir, logger, schema="public"):
     """Extract DDL using pg_dump --schema-only for each table."""
     env = os.environ.copy()
     env["PGHOST"] = conn_params["host"]
@@ -91,13 +91,14 @@ def extract_ddl_pgdump(conn_params, tables, backup_dir, logger):
     env["PGDATABASE"] = conn_params["dbname"]
     env["PGUSER"] = conn_params["user"]
     env["PGPASSWORD"] = conn_params["password"]
-    env["PGSSLMODE"] = conn_params.get("sslmode", "require")
+    if "sslmode" in conn_params:
+        env["PGSSLMODE"] = conn_params["sslmode"]
 
     all_ddl = []
     for table in tables:
         try:
             result = subprocess.run(
-                ["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "-t", f"public.{table}"],
+                ["pg_dump", "--schema-only", "--no-owner", "--no-privileges", "-t", f"{schema}.{table}"],
                 capture_output=True, text=True, env=env, timeout=30,
             )
             if result.returncode == 0:
@@ -120,7 +121,7 @@ def extract_ddl_pgdump(conn_params, tables, backup_dir, logger):
     return ddl
 
 
-def extract_ddl_fallback(conn, tables, backup_dir, logger):
+def extract_ddl_fallback(conn, tables, backup_dir, logger, schema="public"):
     """Extract DDL using pg_catalog queries (fallback when pg_dump unavailable)."""
     logger.warning("Usando fallback pg_catalog para DDL — partial indexes e expression defaults podem ser omitidos")
     all_ddl = []
@@ -132,9 +133,9 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
                 SELECT column_name, data_type, character_maximum_length,
                        is_nullable, column_default, udt_name
                 FROM information_schema.columns
-                WHERE table_schema = 'public' AND table_name = %s
+                WHERE table_schema = %s AND table_name = %s
                 ORDER BY ordinal_position
-            """, (table,))
+            """, (schema, table))
             columns = cur.fetchall()
 
             col_defs = []
@@ -158,7 +159,7 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
                     parts.append(f"DEFAULT {default}")
                 col_defs.append(" ".join(parts))
 
-            ddl = f'CREATE TABLE IF NOT EXISTS "public"."{table}" (\n'
+            ddl = f'CREATE TABLE IF NOT EXISTS "{schema}"."{table}" (\n'
             ddl += ",\n".join(col_defs)
 
             # Get primary key
@@ -169,10 +170,10 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
                     ON tc.constraint_name = kcu.constraint_name
                     AND tc.table_schema = kcu.table_schema
                 WHERE tc.constraint_type = 'PRIMARY KEY'
-                    AND tc.table_schema = 'public'
+                    AND tc.table_schema = %s
                     AND tc.table_name = %s
                 ORDER BY kcu.ordinal_position
-            """, (table,))
+            """, (schema, table))
             pk_cols = [row[0] for row in cur.fetchall()]
             if pk_cols:
                 pk_quoted = ", ".join(f'"{c}"' for c in pk_cols)
@@ -183,12 +184,12 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
             # Get indexes (non-primary)
             cur.execute("""
                 SELECT indexdef FROM pg_indexes
-                WHERE schemaname = 'public' AND tablename = %s
+                WHERE schemaname = %s AND tablename = %s
                 AND indexname NOT IN (
                     SELECT constraint_name FROM information_schema.table_constraints
-                    WHERE table_schema = 'public' AND table_name = %s AND constraint_type = 'PRIMARY KEY'
+                    WHERE table_schema = %s AND table_name = %s AND constraint_type = 'PRIMARY KEY'
                 )
-            """, (table, table))
+            """, (schema, table, schema, table))
             for (indexdef,) in cur.fetchall():
                 ddl += f"{indexdef};\n"
 
@@ -213,13 +214,13 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
                     ON tc.constraint_name = ccu.constraint_name
                     AND tc.table_schema = ccu.table_schema
                 WHERE tc.constraint_type = 'FOREIGN KEY'
-                    AND tc.table_schema = 'public'
+                    AND tc.table_schema = %s
                     AND tc.table_name = %s
-            """, (table,))
+            """, (schema, table))
             for constraint_name, tbl, col, ref_tbl, ref_col in cur.fetchall():
                 fk_ddl.append(
-                    f'ALTER TABLE "public"."{tbl}" ADD CONSTRAINT "{constraint_name}" '
-                    f'FOREIGN KEY ("{col}") REFERENCES "public"."{ref_tbl}" ("{ref_col}");'
+                    f'ALTER TABLE "{schema}"."{tbl}" ADD CONSTRAINT "{constraint_name}" '
+                    f'FOREIGN KEY ("{col}") REFERENCES "{schema}"."{ref_tbl}" ("{ref_col}");'
                 )
 
     if fk_ddl:
@@ -233,15 +234,15 @@ def extract_ddl_fallback(conn, tables, backup_dir, logger):
     return ddl
 
 
-def extract_ddl(conn, conn_params, tables, backup_dir, logger):
+def extract_ddl(conn, conn_params, tables, backup_dir, logger, schema="public"):
     """Extract DDL — try pg_dump first, fallback to pg_catalog."""
-    ddl = extract_ddl_pgdump(conn_params, tables, backup_dir, logger)
+    ddl = extract_ddl_pgdump(conn_params, tables, backup_dir, logger, schema=schema)
     if ddl is None:
-        ddl = extract_ddl_fallback(conn, tables, backup_dir, logger)
+        ddl = extract_ddl_fallback(conn, tables, backup_dir, logger, schema=schema)
     return ddl
 
 
-def export_table_data(conn_params, table, backup_dir, logger):
+def export_table_data(conn_params, table, backup_dir, logger, schema="public"):
     """Export a single table's data to CSV using COPY TO STDOUT."""
     start = time.time()
     csv_path = os.path.join(backup_dir, f"{table}.csv")
@@ -252,13 +253,13 @@ def export_table_data(conn_params, table, backup_dir, logger):
             with conn.cursor() as cur:
                 # Get row count
                 cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(
-                    sql.Identifier("public", table)
+                    sql.Identifier(schema, table)
                 ))
                 row_count = cur.fetchone()[0]
 
                 # Export via COPY
                 with cur.copy(sql.SQL("COPY {} TO STDOUT WITH (FORMAT CSV, HEADER, ENCODING 'UTF8')").format(
-                    sql.Identifier("public", table)
+                    sql.Identifier(schema, table)
                 )) as copy:
                     with open(csv_path, "wb") as f:
                         for data in copy:
@@ -273,12 +274,12 @@ def export_table_data(conn_params, table, backup_dir, logger):
         return table, 0, str(e)
 
 
-def export_all_data(conn_params, tables, backup_dir, logger, workers=4):
+def export_all_data(conn_params, tables, backup_dir, logger, workers=4, schema="public"):
     """Export all tables in parallel using ThreadPoolExecutor."""
     results = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(export_table_data, conn_params, table, backup_dir, logger): table
+            executor.submit(export_table_data, conn_params, table, backup_dir, logger, schema=schema): table
             for table in tables
         }
         for future in as_completed(futures):
@@ -286,14 +287,14 @@ def export_all_data(conn_params, tables, backup_dir, logger, workers=4):
     return results
 
 
-def export_sequences(conn, backup_dir, logger):
+def export_sequences(conn, backup_dir, logger, schema="public"):
     """Export sequence states to sequences.sql."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT sequencename, last_value, is_called
             FROM pg_sequences
-            WHERE schemaname = 'public'
-        """)
+            WHERE schemaname = %s
+        """, (schema,))
         sequences = cur.fetchall()
 
     if not sequences:
@@ -305,6 +306,6 @@ def export_sequences(conn, backup_dir, logger):
         for seq_name, last_value, is_called in sequences:
             if last_value is not None:
                 is_called_str = "true" if is_called else "false"
-                f.write(f"SELECT setval('\"public\".\"{seq_name}\"', {last_value}, {is_called_str});\n")
+                f.write(f"SELECT setval('\"{schema}\".\"{seq_name}\"', {last_value}, {is_called_str});\n")
 
     logger.info(f"{len(sequences)} sequences exportadas")

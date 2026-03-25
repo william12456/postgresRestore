@@ -64,4 +64,6 @@ def load_config():
             print(f"ERRO: Variáveis de ambiente faltando para banco local: {', '.join('LOCAL_DB_' + k.upper() for k in missing)}")
             sys.exit(1)
 
-    return {"remote": remote, "local": local}
+    schema = os.getenv("DB_SCHEMA", "public")
+
+    return {"remote": remote, "local": local, "schema": schema}

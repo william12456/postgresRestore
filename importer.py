@@ -33,7 +33,7 @@ def safety_check(remote_config, local_config, tables, force, dry_run, logger):
     return True
 
 
-def run_import(local_config, tables, backup_dir, logger):
+def run_import(local_config, tables, backup_dir, logger, schema="public"):
     """Execute transactional import: drop, create, copy data, restore sequences."""
     start = time.time()
 
@@ -59,7 +59,7 @@ def run_import(local_config, tables, backup_dir, logger):
             # Drop all tables
             for table in reversed(tables):
                 cur.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
-                    sql.Identifier("public", table)
+                    sql.Identifier(schema, table)
                 ))
                 logger.debug(f"Dropada: {table}")
             logger.info(f"{len(tables)} tabelas dropadas")
@@ -86,7 +86,7 @@ def run_import(local_config, tables, backup_dir, logger):
                 row_count = 0
 
                 with cur.copy(sql.SQL("COPY {} FROM STDIN WITH (FORMAT CSV, HEADER)").format(
-                    sql.Identifier("public", table)
+                    sql.Identifier(schema, table)
                 )) as copy:
                     with open(csv_path, "rb") as f:
                         while data := f.read(8192):
@@ -94,7 +94,7 @@ def run_import(local_config, tables, backup_dir, logger):
 
                 # Count imported rows
                 cur.execute(sql.SQL("SELECT COUNT(*) FROM {}").format(
-                    sql.Identifier("public", table)
+                    sql.Identifier(schema, table)
                 ))
                 row_count = cur.fetchone()[0]
                 total_rows += row_count

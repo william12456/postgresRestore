@@ -91,7 +91,8 @@ def extract_ddl_pgdump(conn_params, tables, backup_dir, logger, schema="public")
     env["PGDATABASE"] = conn_params["dbname"]
     env["PGUSER"] = conn_params["user"]
     env["PGPASSWORD"] = conn_params["password"]
-    env["PGSSLMODE"] = conn_params.get("sslmode", "require")
+    if "sslmode" in conn_params:
+        env["PGSSLMODE"] = conn_params["sslmode"]
 
     all_ddl = []
     for table in tables:

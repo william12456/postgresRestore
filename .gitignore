@@ -3,3 +3,10 @@ backups/
 __pycache__/
 *.pyc
 .venv/
+.claude
+.ralphy
+.agent
+.agents
+.vscode
+.idea
+

@@ -33,7 +33,7 @@ def safety_check(remote_config, local_config, tables, force, dry_run, logger):
     return True
 
 
-def run_import(local_config, tables, backup_dir, logger, schema="public"):
+def run_import(local_config, tables, backup_dir, logger, schema="public", source_schema="public"):
     """Execute transactional import: drop, create, copy data, restore sequences."""
     start = time.time()
 
@@ -42,12 +42,20 @@ def run_import(local_config, tables, backup_dir, logger, schema="public"):
     with open(schema_path, "r", encoding="utf-8") as f:
         schema_sql = f.read()
 
+    # Rewrite schema references if local schema differs from remote
+    if schema != source_schema:
+        schema_sql = schema_sql.replace(f'"{source_schema}".', f'"{schema}".')
+        schema_sql = schema_sql.replace(f"SET search_path = {source_schema},", f"SET search_path = {schema},")
+        logger.info(f"DDL reescrito: {source_schema} -> {schema}")
+
     # Read sequences SQL (optional)
     seq_path = os.path.join(backup_dir, "sequences.sql")
     sequences_sql = None
     if os.path.exists(seq_path):
         with open(seq_path, "r", encoding="utf-8") as f:
             sequences_sql = f.read()
+        if schema != source_schema:
+            sequences_sql = sequences_sql.replace(f'"{source_schema}".', f'"{schema}".')
 
     conn = psycopg.connect(**local_config, autocommit=False)
     try:
@@ -55,6 +63,13 @@ def run_import(local_config, tables, backup_dir, logger, schema="public"):
             # Disable FK checks
             cur.execute("SET session_replication_role = 'replica'")
             logger.info("FK constraints desabilitadas")
+
+            # Create target schema if it doesn't exist
+            if schema != "public":
+                cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                    sql.Identifier(schema)
+                ))
+                logger.info(f"Schema {schema} criado/verificado")
 
             # Drop all tables
             for table in reversed(tables):
